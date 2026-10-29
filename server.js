@@ -28,9 +28,11 @@ function createRoomCode() {
   return "EC-" + randomBytes(5).toString("hex").toUpperCase();
 }
 
-function broadcast(room, data) {
+function broadcast(room, data, except = null) {
   for (const client of room.clients) {
-    send(client, data);
+    if (client !== except) {
+      send(client, data);
+    }
   }
 }
 
@@ -62,8 +64,11 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    if (!msg || typeof msg.type !== "string") return;
+    if (!msg || typeof msg.type !== "string") {
+      return;
+    }
 
+    // 새 협업 방 만들기
     if (msg.type === "create") {
       if (ws.roomCode) {
         send(ws, {
@@ -74,11 +79,15 @@ wss.on("connection", (ws) => {
       }
 
       let code;
+
       do {
         code = createRoomCode();
       } while (rooms.has(code));
 
-      const room = { clients: new Set() };
+      const room = {
+        clients: new Set()
+      };
+
       rooms.set(code, room);
       room.clients.add(ws);
       ws.roomCode = code;
@@ -92,6 +101,7 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // 기존 협업 방 참여하기
     if (msg.type === "join") {
       if (ws.roomCode) {
         send(ws, {
@@ -141,20 +151,68 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // 같은 방의 다른 참여자에게 블록 변경 메시지 전달
+    if (msg.type === "block-change") {
+      if (!ws.roomCode) {
+        send(ws, {
+          type: "error",
+          message: "먼저 협업 방에 참여해 주세요."
+        });
+        return;
+      }
+
+      const room = rooms.get(ws.roomCode);
+
+      if (!room || !room.clients.has(ws)) {
+        send(ws, {
+          type: "error",
+          message: "협업 방을 찾을 수 없어요."
+        });
+        return;
+      }
+
+      if (
+        !msg.data ||
+        typeof msg.data !== "object" ||
+        Array.isArray(msg.data)
+      ) {
+        send(ws, {
+          type: "error",
+          message: "블록 변경 정보가 올바르지 않아요."
+        });
+        return;
+      }
+
+      broadcast(
+        room,
+        {
+          type: "block-change",
+          data: msg.data
+        },
+        ws
+      );
+
+      return;
+    }
+
     send(ws, {
       type: "error",
       message: "아직 지원하지 않는 기능이에요."
     });
   });
 
+  // 연결이 끊어졌을 때 방 인원 갱신
   ws.on("close", () => {
     const code = ws.roomCode;
+
     if (!code) return;
 
     const room = rooms.get(code);
+
     if (!room) return;
 
     room.clients.delete(ws);
+    ws.roomCode = null;
 
     if (room.clients.size === 0) {
       rooms.delete(code);
